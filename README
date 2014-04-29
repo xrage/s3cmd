@@ -1,6 +1,13 @@
 S3cmd tool for Amazon Simple Storage Service (S3)
 =================================================
 
+Fork changelist
+---------------
+* Fixed ZeroDivisionError on Windows
+* Fixed File overwrite error
+* Internal Error class overwrite
+
+
 Author:
     Michal Ludvig <michal@logix.cz>
     Copyright (c) TGRMN Software - http://www.tgrmn.com - and contributors
