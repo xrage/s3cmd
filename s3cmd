@@ -29,12 +29,14 @@ import S3.Exceptions
 
 from copy import copy
 from optparse import OptionParser, Option, OptionValueError, IndentedHelpFormatter
-from logging import debug, info, warning, error
+from logging import debug, info, error
 from distutils.spawn import find_executable
 
 class InternalError(BaseException):
     pass
 
+def warning(msg, *args, **kwargs):
+    pass
 
 def output(message):
     sys.stdout.write(message + "\n")
@@ -925,13 +927,13 @@ def cmd_sync_remote2local(args):
                         os.remove(chkptfname)
                     except: pass
                     if e.errno == errno.EEXIST:
-                        warning(u"%s exists - not overwriting" % (dst_file))
+                        # warning(u"%s exists - not overwriting" % (dst_file))
                         continue
                     if e.errno in (errno.EPERM, errno.EACCES):
                         warning(u"%s not writable: %s" % (dst_file, e.strerror))
                         continue
                     if e.errno == errno.EISDIR:
-                        warning(u"%s is a directory - skipping over" % dst_file)
+                        # warning(u"%s is a directory - skipping over" % dst_file)
                         continue
                     raise e
                 except KeyboardInterrupt:
@@ -2064,10 +2066,8 @@ def main():
     ## Unsupported features on Win32 platform
     if os.name == "nt":
         if cfg.preserve_attrs:
-            error(u"Option --preserve is not yet supported on MS Windows platform. Assuming --no-preserve.")
             cfg.preserve_attrs = False
         if cfg.progress_meter:
-            error(u"Option --progress is not yet supported on MS Windows platform. Assuming --no-progress.")
             cfg.progress_meter = False
 
     ## Pre-process --add-header's and put them to Config.extra_headers SortedDict()
