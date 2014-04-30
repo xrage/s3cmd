@@ -2,7 +2,6 @@
 ## Author: Michal Ludvig <michal@logix.cz>
 ##         http://www.logix.cz/michal
 ## License: GPL Version 2
-## Copyright: TGRMN Software and contributors
 
 import logging
 from logging import debug, info, warning, error
@@ -44,7 +43,6 @@ class Config(object):
     upload_id = None
     skip_existing = False
     recursive = False
-    restore_days = 1
     acl_public = None
     acl_grants = []
     acl_revokes = []
@@ -93,6 +91,7 @@ class Config(object):
     debug_exclude = {}
     debug_include = {}
     encoding = "utf-8"
+    add_content_encoding = True
     urlencoding_mode = "normal"
     log_target_prefix = ""
     reduced_redundancy = False
@@ -110,9 +109,6 @@ class Config(object):
     cache_file = ""
     add_headers = ""
     ignore_failed_copy = False
-    expiry_days = ""
-    expiry_date = ""
-    expiry_prefix = ""
 
     ## Creating a singleton
     def __new__(self, configfile = None, access_key=None, secret_key=None):
@@ -232,43 +228,31 @@ class Config(object):
     def update_option(self, option, value):
         if value is None:
             return
-
         #### Handle environment reference
         if str(value).startswith("$"):
             return self.update_option(option, os.getenv(str(value)[1:]))
-
         #### Special treatment of some options
         ## verbosity must be known to "logging" module
         if option == "verbosity":
-            # support integer verboisities
             try:
-                value = int(value)
-            except ValueError, e:
-                try:
-                    # otherwise it must be a key known to the logging module
-                    value = logging._levelNames[value]
-                except KeyError:
-                    error("Config: verbosity level '%s' is not valid" % value)
-                    return
-
+                setattr(Config, "verbosity", logging._levelNames[value])
+            except KeyError:
+                error("Config: verbosity level '%s' is not valid" % value)
         ## allow yes/no, true/false, on/off and 1/0 for boolean options
         elif type(getattr(Config, option)) is type(True):   # bool
             if str(value).lower() in ("true", "yes", "on", "1"):
-                value = True
+                setattr(Config, option, True)
             elif str(value).lower() in ("false", "no", "off", "0"):
-                value = False
+                setattr(Config, option, False)
             else:
                 error("Config: value of option '%s' must be Yes or No, not '%s'" % (option, value))
-                return
-
         elif type(getattr(Config, option)) is type(42):     # int
             try:
-                value = int(value)
+                setattr(Config, option, int(value))
             except ValueError, e:
                 error("Config: value of option '%s' must be an integer, not '%s'" % (option, value))
-                return
-
-        setattr(Config, option, value)
+        else:                           # string
+            setattr(Config, option, value)
 
 class ConfigParser(object):
     def __init__(self, file, sections = []):
@@ -326,12 +310,6 @@ class ConfigDumper(object):
     def dump(self, section, config):
         self.stream.write("[%s]\n" % section)
         for option in config.option_list():
-            value = getattr(config, option)
-            if option == "verbosity":
-                # we turn level numbers back into strings if possible
-                if isinstance(value,int) and value in logging._levelNames:
-                    value = logging._levelNames[value]
-
-            self.stream.write("%s = %s\n" % (option, value))
+            self.stream.write("%s = %s\n" % (option, getattr(config, option)))
 
 # vim:et:ts=4:sts=4:ai

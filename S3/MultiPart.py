@@ -8,6 +8,7 @@ from stat import ST_SIZE
 from logging import debug, info, warning, error
 from Utils import getTextFromXml, getTreeFromXml, formatSize, unicodise, calculateChecksum, parseNodes
 from Exceptions import S3UploadError
+from collections import defaultdict
 
 class MultiPartUpload(object):
 
@@ -27,7 +28,7 @@ class MultiPartUpload(object):
         multipart_response = self.s3.list_multipart(uri, upload_id)
         tree = getTreeFromXml(multipart_response['data'])
 
-        parts = dict()
+        parts = defaultdict(lambda: None)
         for elem in parseNodes(tree):
             try:
                 parts[int(elem['PartNumber'])] = {'checksum': elem['ETag'], 'size': elem['Size']}
@@ -92,7 +93,7 @@ class MultiPartUpload(object):
         else:
             debug("MultiPart: Uploading from %s" % (self.file.name))
 
-        remote_statuses = dict()
+        remote_statuses = defaultdict(lambda: None)
         if self.s3.config.put_continue:
             remote_statuses = self.get_parts_information(self.uri, self.upload_id)
 
@@ -108,7 +109,7 @@ class MultiPartUpload(object):
                     'extra' : "[part %d of %d, %s]" % (seq, nr_parts, "%d%sB" % formatSize(current_chunk_size, human_readable = True))
                 }
                 try:
-                    self.upload_part(seq, offset, current_chunk_size, labels, remote_status = remote_statuses.get(seq))
+                    self.upload_part(seq, offset, current_chunk_size, labels, remote_status = remote_statuses[seq])
                 except:
                     error(u"\nUpload of '%s' part %d failed. Use\n  %s abortmp %s %s\nto abort the upload, or\n  %s --upload-id %s put ...\nto continue the upload."
                           % (self.file.name, seq, sys.argv[0], self.uri, self.upload_id, sys.argv[0], self.upload_id))
@@ -127,7 +128,7 @@ class MultiPartUpload(object):
                 if len(buffer) == 0: # EOF
                     break
                 try:
-                    self.upload_part(seq, offset, current_chunk_size, labels, buffer, remote_status = remote_statuses.get(seq))
+                    self.upload_part(seq, offset, current_chunk_size, labels, buffer, remote_status = remote_statuses[seq])
                 except:
                     error(u"\nUpload of '%s' part %d failed. Use\n  %s abortmp %s %s\nto abort, or\n  %s --upload-id %s put ...\nto continue the upload."
                           % (self.file.name, seq, self.uri, sys.argv[0], self.upload_id, sys.argv[0], self.upload_id))

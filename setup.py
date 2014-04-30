@@ -74,8 +74,7 @@ setup(
 Authors:
 --------
     Michal Ludvig  <michal@logix.cz>
-""" % (S3.PkgInfo.long_description),
-    requires=["dateutil"]
+""" % (S3.PkgInfo.long_description)
     )
 
 # vim:et:ts=4:sts=4:ai

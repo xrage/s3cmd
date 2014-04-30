@@ -2,19 +2,15 @@
 ## Author: Michal Ludvig <michal@logix.cz>
 ##         http://www.logix.cz/michal
 ## License: GPL Version 2
-## Copyright: TGRMN Software and contributors
 
 import sys
 import os, os.path
 import time
 import errno
-import base64
 import httplib
 import logging
 import mimetypes
 import re
-from xml.sax import saxutils
-import base64
 from logging import debug, info, warning, error
 from stat import ST_SIZE
 
@@ -35,30 +31,46 @@ from S3Uri import S3Uri
 from ConnMan import ConnMan
 
 try:
-    import magic
+    import magic, gzip
     try:
         ## https://github.com/ahupp/python-magic
         magic_ = magic.Magic(mime=True)
         def mime_magic_file(file):
             return magic_.from_file(file)
+        def mime_magic_buffer(buffer):
+            return magic_.from_buffer(buffer)
     except TypeError:
         ## http://pypi.python.org/pypi/filemagic
         try:
             magic_ = magic.Magic(flags=magic.MAGIC_MIME)
             def mime_magic_file(file):
                 return magic_.id_filename(file)
+            def mime_magic_buffer(buffer):
+                return magic_.id_buffer(buffer)
         except TypeError:
             ## file-5.11 built-in python bindings
             magic_ = magic.open(magic.MAGIC_MIME)
             magic_.load()
             def mime_magic_file(file):
                 return magic_.file(file)
+            def mime_magic_buffer(buffer):
+                return magic_.buffer(buffer)
+
     except AttributeError:
         ## Older python-magic versions
         magic_ = magic.open(magic.MAGIC_MIME)
         magic_.load()
         def mime_magic_file(file):
             return magic_.file(file)
+        def mime_magic_buffer(buffer):
+            return magic_.buffer(buffer)
+
+    def mime_magic(file):
+        type = mime_magic_file(file)
+        if type != "application/x-gzip; charset=binary":
+            return (type, None)
+        else:
+            return (mime_magic_buffer(gzip.open(file).read(8192)), 'gzip')
 
 except ImportError, e:
     if str(e).find("magic") >= 0:
@@ -67,37 +79,12 @@ except ImportError, e:
         magic_message = "Module python-magic can't be used (%s)." % e.message
     magic_message += " Guessing MIME types based on file extensions."
     magic_warned = False
-    def mime_magic_file(file):
+    def mime_magic(file):
         global magic_warned
         if (not magic_warned):
             warning(magic_message)
             magic_warned = True
-        return mimetypes.guess_type(file)[0]
-
-def mime_magic(file):
-    # we can't tell if a given copy of the magic library will take a
-    # filesystem-encoded string or a unicode value, so try first
-    # with the encoded string, then unicode.
-    def _mime_magic(file):
-        magictype = None
-        try:
-            magictype = mime_magic_file(file)
-        except UnicodeDecodeError:
-            magictype = mime_magic_file(unicodise(file))
-        return magictype
-
-    result = _mime_magic(file)
-    if result is not None:
-        if isinstance(result, str):
-            if ';' in result:
-                mimetype, charset = result.split(';')
-                charset = charset[len('charset'):]
-                result = (mimetype, charset)
-            else:
-                result = (result, None)
-    if result is None:
-        result = (None, None)
-    return result
+        return mimetypes.guess_type(file)
 
 __all__ = []
 class S3Request(object):
@@ -174,7 +161,6 @@ class S3(object):
         SERVICE = 0x0100,
         BUCKET = 0x0200,
         OBJECT = 0x0400,
-        BATCH = 0x0800,
         MASK = 0x0700,
     )
 
@@ -189,7 +175,6 @@ class S3(object):
         OBJECT_HEAD = targets["OBJECT"] | http_methods["HEAD"],
         OBJECT_DELETE = targets["OBJECT"] | http_methods["DELETE"],
         OBJECT_POST = targets["OBJECT"] | http_methods["POST"],
-        BATCH_DELETE = targets["BATCH"] | http_methods["POST"],
     )
 
     codes = {
@@ -238,7 +223,7 @@ class S3(object):
         response["list"] = getListFromXml(response["data"], "Bucket")
         return response
 
-    def bucket_list(self, bucket, prefix = None, recursive = None, uri_params = {}):
+    def bucket_list(self, bucket, prefix = None, recursive = None):
         def _list_truncated(data):
             ## <IsTruncated> can either be "true" or "false" or be missing completely
             is_truncated = getTextFromXml(data, ".//IsTruncated") or "false"
@@ -250,6 +235,7 @@ class S3(object):
         def _get_common_prefixes(data):
             return getListFromXml(data, "CommonPrefixes")
 
+        uri_params = {}
         truncated = True
         list = []
         prefixes = []
@@ -381,62 +367,6 @@ class S3(object):
 
         return response
 
-    def expiration_info(self, uri, bucket_location = None):
-        headers = SortedDict(ignore_case = True)
-        bucket = uri.bucket()
-        body = ""
-
-        request = self.create_request("BUCKET_LIST", bucket = bucket, extra="?lifecycle")
-        try:
-            response = self.send_request(request, body)
-            response['prefix'] = getTextFromXml(response['data'], ".//Rule//Prefix")
-            response['date'] = getTextFromXml(response['data'], ".//Rule//Expiration//Date")
-            response['days'] = getTextFromXml(response['data'], ".//Rule//Expiration//Days")
-            return response
-        except S3Error, e:
-            if e.status == 404:
-                debug("Could not get /?lifecycle - lifecycle probably not configured for this bucket")
-                return None
-            raise
-
-    def expiration_set(self, uri, bucket_location = None):
-        if self.config.expiry_date and self.config.expiry_days:
-             raise ParameterError("Expect either --expiry-day or --expiry-date")
-        if not (self.config.expiry_date or self.config.expiry_days):
-             if self.config.expiry_prefix:
-                 raise ParameterError("Expect either --expiry-day or --expiry-date")
-             debug("del bucket lifecycle")
-             bucket = uri.bucket()
-             body = ""
-             request = self.create_request("BUCKET_DELETE", bucket = bucket, extra="?lifecycle")
-        else:
-             request, body = self._expiration_set(uri)
-        debug("About to send request '%s' with body '%s'" % (request, body))
-        response = self.send_request(request, body)
-        debug("Received response '%s'" % (response))
-        return response
-
-    def _expiration_set(self, uri):
-        debug("put bucket lifecycle")
-        body = '<LifecycleConfiguration>'
-        body += '  <Rule>'
-        body += ('    <Prefix>%s</Prefix>' % self.config.expiry_prefix)
-        body += ('    <Status>Enabled</Status>')
-        body += ('    <Expiration>')
-        if self.config.expiry_date:
-            body += ('    <Date>%s</Date>' % self.config.expiry_date)
-        elif self.config.expiry_days:
-            body += ('    <Days>%s</Days>' % self.config.expiry_days)
-        body += ('    </Expiration>')
-        body += '  </Rule>'
-        body += '</LifecycleConfiguration>'
-
-        headers = SortedDict(ignore_case = True)
-        headers['content-md5'] = compute_content_md5(body)
-        bucket = uri.bucket()
-        request =  self.create_request("BUCKET_CREATE", bucket = bucket, headers = headers, extra="?lifecycle")
-        return (request, body)
-
     def add_encoding(self, filename, content_type):
         if content_type.find("charset=") != -1:
            return False
@@ -480,22 +410,19 @@ class S3(object):
 
         ## MIME-type handling
         content_type = self.config.mime_type
-        content_charset = None
+        content_encoding = None
         if filename != "-" and not content_type and self.config.guess_mime_type:
-            if self.config.use_mime_magic:
-                (content_type, content_charset) = mime_magic(filename)
-            else:
-                (content_type, content_charset) = mimetypes.guess_type(filename)
+            (content_type, content_encoding) = mime_magic(filename) if self.config.use_mime_magic else mimetypes.guess_type(filename)
         if not content_type:
             content_type = self.config.default_mime_type
-        if not content_charset:
-            content_charset = self.config.encoding.upper()
 
         ## add charset to content type
-        if self.add_encoding(filename, content_type) and content_charset is not None:
-            content_type = content_type + "; charset=" + content_charset
+        if self.add_encoding(filename, content_type):
+            content_type = content_type + "; charset=" + self.config.encoding.upper()
 
         headers["content-type"] = content_type
+        if content_encoding is not None and self.config.add_content_encoding:
+            headers["content-encoding"] = content_encoding
 
         ## Other Amazon S3 attributes
         if self.config.acl_public:
@@ -554,52 +481,11 @@ class S3(object):
         response = self.recv_file(request, stream, labels, start_position)
         return response
 
-    def object_batch_delete(self, remote_list):
-        def compose_batch_del_xml(bucket, key_list):
-            body = u"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Delete>"
-            for key in key_list:
-                uri = S3Uri(key)
-                if uri.type != "s3":
-                    raise ValueError("Excpected URI type 's3', got '%s'" % uri.type)
-                if not uri.has_object():
-                    raise ValueError("URI '%s' has no object" % key)
-                if uri.bucket() != bucket:
-                    raise ValueError("The batch should contain keys from the same bucket")
-                object = saxutils.escape(uri.object())
-                body += u"<Object><Key>%s</Key></Object>" % object
-            body += u"</Delete>"
-            body = body.encode('utf-8')
-            return body
-
-        batch = [remote_list[item]['object_uri_str'] for item in remote_list]
-        if len(batch) == 0:
-            raise ValueError("Key list is empty")
-        bucket = S3Uri(batch[0]).bucket()
-        request_body = compose_batch_del_xml(bucket, batch)
-        md5_hash = md5()
-        md5_hash.update(request_body)
-        headers = {'content-md5': base64.b64encode(md5_hash.digest())}
-        request = self.create_request("BATCH_DELETE", bucket = bucket, extra = '?delete', headers = headers)
-        response = self.send_request(request, request_body)
-        return response
-
     def object_delete(self, uri):
         if uri.type != "s3":
             raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
         request = self.create_request("OBJECT_DELETE", uri = uri)
         response = self.send_request(request)
-        return response
-
-    def object_restore(self, uri):
-        if uri.type != "s3":
-            raise ValueError("Expected URI type 's3', got '%s'" % uri.type)
-        body = '<RestoreRequest xmlns="http://s3.amazonaws.com/doc/2006-3-01">'
-        body += ('  <Days>%s</Days>' % self.config.restore_days)
-        body += '</RestoreRequest>'
-        request = self.create_request("OBJECT_POST", uri = uri, extra = "?restore")
-        debug("About to send request '%s' with body '%s'" % (request, body))
-        response = self.send_request(request, body)
-        debug("Received response '%s'" % (response))
         return response
 
     def object_copy(self, src_uri, dst_uri, extra_headers = None):
@@ -615,14 +501,13 @@ class S3(object):
             headers["x-amz-acl"] = "public-read"
         if self.config.reduced_redundancy:
             headers["x-amz-storage-class"] = "REDUCED_REDUNDANCY"
+        # if extra_headers:
+        #   headers.update(extra_headers)
 
         ## Set server side encryption
         if self.config.server_side_encryption:
             headers["x-amz-server-side-encryption"] = "AES256"
 
-        if extra_headers:
-            headers['x-amz-metadata-directive'] = "REPLACE"
-            headers.update(extra_headers)
         request = self.create_request("OBJECT_PUT", uri = dst_uri, headers = headers)
         response = self.send_request(request)
         return response
@@ -842,8 +727,6 @@ class S3(object):
             ConnMan.put(conn)
         except ParameterError, e:
             raise
-        except (IOError, OSError), e:
-            raise
         except Exception, e:
             if retries:
                 warning("Retrying failed request: %s (%s)" % (resource['uri'], e))
@@ -1051,8 +934,6 @@ class S3(object):
             debug("Response: %s" % response)
         except ParameterError, e:
             raise
-        except (IOError, OSError), e:
-            raise
         except Exception, e:
             if self.config.progress_meter:
                 progress.done("failed")
@@ -1105,8 +986,6 @@ class S3(object):
                 if self.config.progress_meter:
                     progress.update(delta_position = len(data))
             ConnMan.put(conn)
-        except (IOError, OSError), e:
-            raise
         except Exception, e:
             if self.config.progress_meter:
                 progress.done("failed")
@@ -1143,14 +1022,10 @@ class S3(object):
                 response["md5"] = response["headers"]["etag"]
 
         md5_hash = response["headers"]["etag"]
-        if not 'x-amz-meta-s3tools-gpgenc' in response["headers"]:
-            # we can't trust our stored md5 because we
-            # encrypted the file after calculating it but before
-            # uploading it.
-            try:
-                md5_hash = response["s3cmd-attrs"]["md5"]
-            except KeyError:
-                pass
+        try:
+            md5_hash = response["s3cmd-attrs"]["md5"]
+        except KeyError:
+            pass
 
         response["md5match"] = md5_hash.find(response["md5"]) >= 0
         response["elapsed"] = timestamp_end - timestamp_start
@@ -1172,11 +1047,4 @@ def parse_attrs_header(attrs_header):
         key, val = attr.split(":")
         attrs[key] = val
     return attrs
-
-def compute_content_md5(body):
-    m = md5(body)
-    base64md5 = base64.encodestring(m.digest())
-    if base64md5[-1] == '\n':
-        base64md5 = base64md5[0:-1]
-    return base64md5
 # vim:et:ts=4:sts=4:ai
