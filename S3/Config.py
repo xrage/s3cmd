@@ -4,7 +4,7 @@
 ## License: GPL Version 2
 
 import logging
-from logging import debug, info, warning, error
+from logging import debug, info, error
 import re
 import os
 import sys
@@ -14,6 +14,9 @@ import httplib
 try:
     import json
 except ImportError, e:
+    pass
+
+def warning(msg, *args, **kwargs):
     pass
 
 class Config(object):

@@ -11,7 +11,7 @@ import httplib
 import logging
 import mimetypes
 import re
-from logging import debug, info, warning, error
+from logging import debug, info, error
 from stat import ST_SIZE
 
 try:
@@ -29,6 +29,12 @@ from Exceptions import *
 from MultiPart import MultiPartUpload
 from S3Uri import S3Uri
 from ConnMan import ConnMan
+
+def warning(msg, *args, **kwargs):
+    """
+    Avoid warning logs
+    """
+    pass
 
 try:
     import magic, gzip
