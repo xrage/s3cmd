@@ -2,6 +2,7 @@
 ## Author: Michal Ludvig <michal@logix.cz>
 ##         http://www.logix.cz/michal
 ## License: GPL Version 2
+## Copyright: TGRMN Software and contributors
 
 import os
 import re
@@ -9,7 +10,7 @@ import sys
 from BidirMap import BidirMap
 from logging import debug
 import S3
-from Utils import unicodise, check_bucket_name_dns_conformity
+from Utils import unicodise, check_bucket_name_dns_conformity, check_bucket_name_dns_support
 import Config
 
 class S3Uri(object):
@@ -74,10 +75,10 @@ class S3UriS3(S3Uri):
         return bool(self._object)
 
     def uri(self):
-        return "/".join(["s3:/", self._bucket, self._object])
+        return u"/".join([u"s3:/", self._bucket, self._object])
 
     def is_dns_compatible(self):
-        return check_bucket_name_dns_conformity(self._bucket)
+        return check_bucket_name_dns_support(Config.Config().host_bucket, self._bucket)
 
     def public_url(self):
         if self.is_dns_compatible():

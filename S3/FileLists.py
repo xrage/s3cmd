@@ -2,6 +2,7 @@
 ## Author: Michal Ludvig <michal@logix.cz>
 ##         http://www.logix.cz/michal
 ## License: GPL Version 2
+## Copyright: TGRMN Software and contributors
 
 from S3 import S3
 from Config import Config
@@ -18,8 +19,9 @@ import sys
 import glob
 import copy
 import re
+import errno
 
-__all__ = ["fetch_local_list", "fetch_remote_list", "compare_filelists", "filter_exclude_include"]
+__all__ = ["fetch_local_list", "fetch_remote_list", "compare_filelists"]
 
 def _fswalk_follow_symlinks(path):
     '''
@@ -58,7 +60,7 @@ def _fswalk_no_symlinks(path):
         yield (dirpath, dirnames, filenames)
 
 def filter_exclude_include(src_list):
-    info(u"Applying --exclude/--include")
+    debug(u"Applying --exclude/--include")
     cfg = Config()
     exclude_list = FileDict(ignore_case = False)
     for file in src_list.keys():
@@ -89,8 +91,6 @@ def filter_exclude_include(src_list):
 def handle_exclude_include_walk(root, dirs, files):
     cfg = Config()
     copydirs = copy.copy(dirs)
-    copyfiles = copy.copy(files)
-
     # exclude dir matches in the current directory
     # this prevents us from recursing down trees we know we want to ignore
     for x in copydirs:
@@ -98,6 +98,7 @@ def handle_exclude_include_walk(root, dirs, files):
         debug(u"CHECK: %r" % d)
         excluded = False
         for r in cfg.exclude:
+            if not r.pattern.endswith(u'/'): continue # we only check for directories here
             if r.search(d):
                 excluded = True
                 debug(u"EXCL-MATCH: '%s'" % (cfg.debug_exclude[r]))
@@ -105,6 +106,8 @@ def handle_exclude_include_walk(root, dirs, files):
         if excluded:
             ## No need to check for --include if not excluded
             for r in cfg.include:
+                if not r.pattern.endswith(u'/'): continue # we only check for directories here
+                debug(u"INCL-TEST: %s ~ %s" % (d, r.pattern))
                 if r.search(d):
                     excluded = False
                     debug(u"INCL-MATCH: '%s'" % (cfg.debug_include[r]))
@@ -116,31 +119,6 @@ def handle_exclude_include_walk(root, dirs, files):
             continue
         else:
             debug(u"PASS: %r" % (d))
-
-    # exclude file matches in the current directory
-    for x in copyfiles:
-        file = os.path.join(root, x)
-        debug(u"CHECK: %r" % file)
-        excluded = False
-        for r in cfg.exclude:
-            if r.search(file):
-                excluded = True
-                debug(u"EXCL-MATCH: '%s'" % (cfg.debug_exclude[r]))
-                break
-        if excluded:
-            ## No need to check for --include if not excluded
-            for r in cfg.include:
-                if r.search(file):
-                    excluded = False
-                    debug(u"INCL-MATCH: '%s'" % (cfg.debug_include[r]))
-                    break
-        if excluded:
-            ## Still excluded - ok, action it
-            debug(u"EXCLUDE: %s" % file)
-            files.remove(x)
-            continue
-        else:
-            debug(u"PASS: %r" % (file))
 
 
 def _get_filelist_from_file(cfg, local_path):
@@ -181,15 +159,67 @@ def _get_filelist_from_file(cfg, local_path):
     return result
 
 def fetch_local_list(args, is_src = False, recursive = None):
+
+    def _fetch_local_list_info(loc_list):
+        len_loc_list = len(loc_list)
+        info(u"Running stat() and reading/calculating MD5 values on %d files, this may take some time..." % len_loc_list)
+        counter = 0
+        for relative_file in loc_list:
+            counter += 1
+            if counter % 1000 == 0:
+                info(u"[%d/%d]" % (counter, len_loc_list))
+
+            if relative_file == '-': continue
+
+            full_name = loc_list[relative_file]['full_name']
+            try:
+                sr = os.stat_result(os.stat(full_name))
+            except OSError, e:
+                if e.errno == errno.ENOENT:
+                    # file was removed async to us getting the list
+                    continue
+                else:
+                    raise
+            loc_list[relative_file].update({
+                'size' : sr.st_size,
+                'mtime' : sr.st_mtime,
+                'dev'   : sr.st_dev,
+                'inode' : sr.st_ino,
+                'uid' : sr.st_uid,
+                'gid' : sr.st_gid,
+                'sr': sr # save it all, may need it in preserve_attrs_list
+                ## TODO: Possibly more to save here...
+            })
+            if 'md5' in cfg.sync_checks:
+                md5 = cache.md5(sr.st_dev, sr.st_ino, sr.st_mtime, sr.st_size)
+                if md5 is None:
+                        try:
+                            md5 = loc_list.get_md5(relative_file) # this does the file I/O
+                        except IOError:
+                            continue
+                        cache.add(sr.st_dev, sr.st_ino, sr.st_mtime, sr.st_size, md5)
+                loc_list.record_hardlink(relative_file, sr.st_dev, sr.st_ino, md5, sr.st_size)
+
+
     def _get_filelist_local(loc_list, local_uri, cache):
         info(u"Compiling list of local files...")
 
         if deunicodise(local_uri.basename()) == "-":
+            try:
+                uid = os.geteuid()
+                gid = os.getegid()
+            except:
+                uid = 0
+                gid = 0
             loc_list["-"] = {
                 'full_name_unicode' : '-',
                 'full_name' : '-',
                 'size' : -1,
                 'mtime' : -1,
+                'uid' : uid,
+                'gid' : gid,
+                'dev' : 0,
+                'inode': 0,
             }
             return loc_list, True
         if local_uri.isdir():
@@ -226,28 +256,11 @@ def fetch_local_list(args, is_src = False, recursive = None):
                     relative_file = replace_nonprintables(relative_file)
                 if relative_file.startswith('./'):
                     relative_file = relative_file[2:]
-                sr = os.stat_result(os.lstat(full_name))
                 loc_list[relative_file] = {
                     'full_name_unicode' : unicodise(full_name),
                     'full_name' : full_name,
-                    'size' : sr.st_size,
-                    'mtime' : sr.st_mtime,
-                    'dev'   : sr.st_dev,
-                    'inode' : sr.st_ino,
-                    'uid' : sr.st_uid,
-                    'gid' : sr.st_gid,
-                    'sr': sr # save it all, may need it in preserve_attrs_list
-                    ## TODO: Possibly more to save here...
                 }
-                if 'md5' in cfg.sync_checks:
-                    md5 = cache.md5(sr.st_dev, sr.st_ino, sr.st_mtime, sr.st_size)
-                    if md5 is None:
-                            try:
-                                md5 = loc_list.get_md5(relative_file) # this does the file I/O
-                            except IOError:
-                                continue
-                            cache.add(sr.st_dev, sr.st_ino, sr.st_mtime, sr.st_size, md5)
-                    loc_list.record_hardlink(relative_file, sr.st_dev, sr.st_ino, md5)
+
         return loc_list, single_file
 
     def _maintain_cache(cache, local_list):
@@ -300,11 +313,12 @@ def fetch_local_list(args, is_src = False, recursive = None):
     if len(local_list) > 1:
         single_file = False
 
+    local_list, exclude_list = filter_exclude_include(local_list)
+    _fetch_local_list_info(local_list)
     _maintain_cache(cache, local_list)
+    return local_list, single_file, exclude_list
 
-    return local_list, single_file
-
-def fetch_remote_list(args, require_attribs = False, recursive = None):
+def fetch_remote_list(args, require_attribs = False, recursive = None, uri_params = {}):
     def _get_remote_attribs(uri, remote_item):
         response = S3(cfg).object_info(uri)
         remote_item.update({
@@ -336,9 +350,11 @@ def fetch_remote_list(args, require_attribs = False, recursive = None):
         ## { 'xyz/blah.txt' : {} }
 
         info(u"Retrieving list of remote files for %s ..." % remote_uri)
+        empty_fname_re = re.compile(r'\A\s*\Z')
 
         s3 = S3(Config())
-        response = s3.bucket_list(remote_uri.bucket(), prefix = remote_uri.object(), recursive = recursive)
+        response = s3.bucket_list(remote_uri.bucket(), prefix = remote_uri.object(),
+                                  recursive = recursive, uri_params = uri_params)
 
         rem_base_original = rem_base = remote_uri.object()
         remote_uri_original = remote_uri
@@ -358,17 +374,21 @@ def fetch_remote_list(args, require_attribs = False, recursive = None):
             else:
                 key = object['Key'][rem_base_len:]      ## Beware - this may be '' if object['Key']==rem_base !!
                 object_uri_str = remote_uri.uri() + key
+            if empty_fname_re.match(key):
+                # Objects may exist on S3 with empty names (''), which don't map so well to common filesystems.
+                warning(u"Empty object name on S3 found, ignoring.")
+                continue
             rem_list[key] = {
                 'size' : int(object['Size']),
                 'timestamp' : dateS3toUnix(object['LastModified']), ## Sadly it's upload time, not our lastmod time :-(
-                'md5' : object['ETag'][1:-1],
+                'md5' : object['ETag'].strip('"\''),
                 'object_key' : object['Key'],
                 'object_uri_str' : object_uri_str,
                 'base_uri' : remote_uri,
                 'dev' : None,
                 'inode' : None,
             }
-            if rem_list[key]['md5'].find("-") > 0: # always get it for multipart uploads
+            if '-' in rem_list[key]['md5']: # always get it for multipart uploads
                 _get_remote_attribs(S3Uri(object_uri_str), rem_list[key])
             md5 = rem_list[key]['md5']
             rem_list.record_md5(key, md5)
@@ -394,13 +414,13 @@ def fetch_remote_list(args, require_attribs = False, recursive = None):
 
     if recursive:
         for uri in remote_uris:
-            objectlist = _get_filelist_remote(uri)
+            objectlist = _get_filelist_remote(uri, recursive = True)
             for key in objectlist:
                 remote_list[key] = objectlist[key]
                 remote_list.record_md5(key, objectlist.get_md5(key))
     else:
         for uri in remote_uris:
-            uri_str = str(uri)
+            uri_str = unicode(uri)
             ## Wildcards used in remote URI?
             ## If yes we'll need a bucket listing...
             wildcard_split_result = re.split("\*|\?", uri_str, maxsplit=1)
@@ -431,7 +451,9 @@ def fetch_remote_list(args, require_attribs = False, recursive = None):
                 md5 = remote_item.get('md5')
                 if md5:
                     remote_list.record_md5(key, md5)
-    return remote_list
+
+    remote_list, exclude_list = filter_exclude_include(remote_list)
+    return remote_list, exclude_list
 
 
 def compare_filelists(src_list, dst_list, src_remote, dst_remote, delay_updates = False):
@@ -446,15 +468,17 @@ def compare_filelists(src_list, dst_list, src_remote, dst_remote, delay_updates 
             return False
 
         ## check size first
-        if 'size' in cfg.sync_checks and dst_list[file]['size'] != src_list[file]['size']:
-            debug(u"xfer: %s (size mismatch: src=%s dst=%s)" % (file, src_list[file]['size'], dst_list[file]['size']))
-            attribs_match = False
+        if 'size' in cfg.sync_checks:
+            if 'size' in dst_list[file] and 'size' in src_list[file]:
+                if dst_list[file]['size'] != src_list[file]['size']:
+                    debug(u"xfer: %s (size mismatch: src=%s dst=%s)" % (file, src_list[file]['size'], dst_list[file]['size']))
+                    attribs_match = False
 
         ## check md5
         compare_md5 = 'md5' in cfg.sync_checks
         # Multipart-uploaded files don't have a valid md5 sum - it ends with "...-nn"
         if compare_md5:
-            if (src_remote == True and src_list[file]['md5'].find("-") >= 0) or (dst_remote == True and dst_list[file]['md5'].find("-") >= 0):
+            if (src_remote == True and '-' in src_list[file]['md5']) or (dst_remote == True and '-' in dst_list[file]['md5']):
                 compare_md5 = False
                 info(u"disabled md5 check for %s" % file)
         if attribs_match and compare_md5:

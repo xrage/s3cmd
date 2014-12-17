@@ -2,6 +2,7 @@
 ## Author: Michal Ludvig <michal@logix.cz>
 ##         http://www.logix.cz/michal
 ## License: GPL Version 2
+## Copyright: TGRMN Software and contributors
 
 import sys
 import time
@@ -15,11 +16,14 @@ try:
 except ImportError:
     import elementtree.ElementTree as ET
 
+from S3 import S3
 from Config import Config
 from Exceptions import *
-from Utils import getTreeFromXml, appendXmlTextNode, getDictFromTree, dateS3toPython, sign_string, getBucketFromHostname, getHostnameFromBucket
+from Utils import getTreeFromXml, appendXmlTextNode, getDictFromTree, dateS3toPython, getBucketFromHostname, getHostnameFromBucket
+from Crypto import sign_string_v2
 from S3Uri import S3Uri, S3UriS3
 from FileLists import fetch_remote_list
+from ConnMan import ConnMan
 
 cloudfront_api_version = "2010-11-01"
 cloudfront_resource = "/%(api_ver)s/distribution" % { 'api_ver' : cloudfront_api_version }
@@ -280,11 +284,12 @@ class InvalidationBatch(object):
 
     def __str__(self):
         tree = ET.Element("InvalidationBatch")
+        s3 = S3(Config())
 
         for path in self.paths:
             if len(path) < 1 or path[0] != "/":
                 path = "/" + path
-            appendXmlTextNode("Path", path, tree)
+            appendXmlTextNode("Path", s3.urlencode_string(path), tree)
         appendXmlTextNode("CallerReference", self.reference, tree)
         return ET.tostring(tree)
 
@@ -432,7 +437,7 @@ class CloudFront(object):
             new_paths = []
             default_index_suffix = '/' + default_index_file
             for path in paths:
-                if path.endswith(default_index_suffix) or path ==  default_index_file:
+                if path.endswith(default_index_suffix) or path == default_index_file:
                     if invalidate_default_index_on_cf:
                         new_paths.append(path)
                     if invalidate_default_index_root_on_cf:
@@ -492,14 +497,14 @@ class CloudFront(object):
         request = self.create_request(operation, dist_id, request_id, headers)
         conn = self.get_connection()
         debug("send_request(): %s %s" % (request['method'], request['resource']))
-        conn.request(request['method'], request['resource'], body, request['headers'])
-        http_response = conn.getresponse()
+        conn.c.request(request['method'], request['resource'], body, request['headers'])
+        http_response = conn.c.getresponse()
         response = {}
         response["status"] = http_response.status
         response["reason"] = http_response.reason
         response["headers"] = dict(http_response.getheaders())
         response["data"] =  http_response.read()
-        conn.close()
+        ConnMan.put(conn)
 
         debug("CloudFront: response: %r" % response)
 
@@ -550,14 +555,15 @@ class CloudFront(object):
 
     def sign_request(self, headers):
         string_to_sign = headers['x-amz-date']
-        signature = sign_string(string_to_sign)
+        signature = sign_string_v2(string_to_sign)
         debug(u"CloudFront.sign_request('%s') = %s" % (string_to_sign, signature))
         return signature
 
     def get_connection(self):
         if self.config.proxy_host != "":
             raise ParameterError("CloudFront commands don't work from behind a HTTP proxy")
-        return httplib.HTTPSConnection(self.config.cloudfront_host)
+        conn = ConnMan.get(self.config.cloudfront_host)
+        return conn
 
     def _fail_wait(self, retries):
         # Wait a few seconds. The more it fails the more we wait.

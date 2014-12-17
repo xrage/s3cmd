@@ -2,6 +2,7 @@
 ## Author: Michal Ludvig <michal@logix.cz>
 ##         http://www.logix.cz/michal
 ## License: GPL Version 2
+## Copyright: TGRMN Software and contributors
 
 import datetime
 import os
@@ -11,13 +12,27 @@ import re
 import string
 import random
 import rfc822
-import hmac
-import base64
 import errno
 import urllib
-
+from calendar import timegm
 from logging import debug, info, warning, error
-
+from ExitCodes import EX_OSFILE
+try:
+    import dateutil.parser
+except ImportError:
+    sys.stderr.write(u"""
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ImportError trying to import dateutil.parser.
+Please install the python dateutil module:
+$ sudo apt-get install python-dateutil
+  or
+$ sudo yum install python-dateutil
+  or
+$ pip install python-dateutil
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+""")
+    sys.stderr.flush()
+    sys.exit(EX_OSFILE)
 
 import Config
 import Exceptions
@@ -57,7 +72,7 @@ def stripNameSpace(xml):
     """
     removeNameSpace(xml) -- remove top-level AWS namespace
     """
-    r = re.compile('^(<?[^>]+?>\s?)(<\w+) xmlns=[\'"](http://[^\'"]+)[\'"](.*)', re.MULTILINE)
+    r = re.compile('^(<?[^>]+?>\s*)(<\w+) xmlns=[\'"](http://[^\'"]+)[\'"](.*)', re.MULTILINE)
     if r.match(xml):
         xmlns = r.match(xml).groups()[2]
         xml = r.sub("\\1\\2\\4", xml)
@@ -76,6 +91,11 @@ def getTreeFromXml(xml):
     except ExpatError, e:
         error(e)
         raise Exceptions.ParameterError("Bucket contains invalid filenames. Please run: s3cmd fixbucket s3://your-bucket/")
+    except Exception, e:
+        error(e)
+        error(xml)
+        raise
+
 __all__.append("getTreeFromXml")
 
 def getListFromXml(xml, node):
@@ -133,23 +153,22 @@ def appendXmlTextNode(tag_name, text, parent):
 __all__.append("appendXmlTextNode")
 
 def dateS3toPython(date):
-    date = re.compile("(\.\d*)?Z").sub(".000Z", date)
-    return time.strptime(date, "%Y-%m-%dT%H:%M:%S.000Z")
+    # Reset milliseconds to 000
+    date = re.compile('\.[0-9]*(?:[Z\\-\\+]*?)').sub(".000", date)
+    return dateutil.parser.parse(date, fuzzy=True)
 __all__.append("dateS3toPython")
 
 def dateS3toUnix(date):
-    ## FIXME: This should be timezone-aware.
-    ## Currently the argument to strptime() is GMT but mktime()
-    ## treats it as "localtime". Anyway...
-    return time.mktime(dateS3toPython(date))
+    ## NOTE: This is timezone-aware and return the timestamp regarding GMT
+    return timegm(dateS3toPython(date).utctimetuple())
 __all__.append("dateS3toUnix")
 
 def dateRFC822toPython(date):
-    return rfc822.parsedate(date)
+    return dateutil.parser.parse(date, fuzzy=True)
 __all__.append("dateRFC822toPython")
 
 def dateRFC822toUnix(date):
-    return time.mktime(dateRFC822toPython(date))
+    return timegm(dateRFC822toPython(date).utctimetuple())
 __all__.append("dateRFC822toUnix")
 
 def formatSize(size, human_readable = False, floating_point = False):
@@ -166,20 +185,8 @@ def formatSize(size, human_readable = False, floating_point = False):
 __all__.append("formatSize")
 
 def formatDateTime(s3timestamp):
-    try:
-        import pytz
-        timezone = pytz.timezone(os.environ.get('TZ', 'UTC'))
-        tz = pytz.timezone('UTC')
-        ## Can't unpack args and follow that with kwargs in python 2.5
-        ## So we pass them all as kwargs
-        params = zip(('year', 'month', 'day', 'hour', 'minute', 'second', 'tzinfo'),
-                     dateS3toPython(s3timestamp)[0:6] + (tz,))
-        params = dict(params)
-        utc_dt = datetime.datetime(**params)
-        dt_object = utc_dt.astimezone(timezone)
-    except ImportError:
-        dt_object = datetime.datetime(*dateS3toPython(s3timestamp)[0:6])
-    return dt_object.strftime("%Y-%m-%d %H:%M")
+    date_obj = dateutil.parser.parse(s3timestamp, fuzzy=True)
+    return date_obj.strftime("%Y-%m-%d %H:%M")
 __all__.append("formatDateTime")
 
 def convertTupleListToDict(list):
@@ -334,43 +341,6 @@ def replace_nonprintables(string):
     return new_string
 __all__.append("replace_nonprintables")
 
-def sign_string(string_to_sign):
-    """Sign a string with the secret key, returning base64 encoded results.
-    By default the configured secret key is used, but may be overridden as
-    an argument.
-
-    Useful for REST authentication. See http://s3.amazonaws.com/doc/s3-developer-guide/RESTAuthentication.html
-    """
-    signature = base64.encodestring(hmac.new(Config.Config().secret_key, string_to_sign, sha1).digest()).strip()
-    return signature
-__all__.append("sign_string")
-
-def sign_url(url_to_sign, expiry):
-    """Sign a URL in s3://bucket/object form with the given expiry
-    time. The object will be accessible via the signed URL until the
-    AWS key and secret are revoked or the expiry time is reached, even
-    if the object is otherwise private.
-
-    See: http://s3.amazonaws.com/doc/s3-developer-guide/RESTAuthentication.html
-    """
-    return sign_url_base(
-        bucket = url_to_sign.bucket(),
-        object = url_to_sign.object(),
-        expiry = expiry
-    )
-__all__.append("sign_url")
-
-def sign_url_base(**parms):
-    """Shared implementation of sign_url methods. Takes a hash of 'bucket', 'object' and 'expiry' as args."""
-    parms['expiry']=time_to_epoch(parms['expiry'])
-    parms['access_key']=Config.Config().access_key
-    debug("Expiry interpreted as epoch time %s", parms['expiry'])
-    signtext = 'GET\n\n\n%(expiry)d\n/%(bucket)s/%(object)s' % parms
-    debug("Signing plaintext: %r", signtext)
-    parms['sig'] = urllib.quote_plus(sign_string(signtext))
-    debug("Urlencoded signature: %s", parms['sig'])
-    return "http://%(bucket)s.s3.amazonaws.com/%(object)s?AWSAccessKeyId=%(access_key)s&Expires=%(expiry)d&Signature=%(sig)s" % parms
-
 def time_to_epoch(t):
     """Convert time specified in a variety of forms into UNIX epoch time.
     Accepts datetime.datetime, int, anything that has a strftime() method, and standard time 9-tuples
@@ -437,6 +407,20 @@ def check_bucket_name_dns_conformity(bucket):
         return False
 __all__.append("check_bucket_name_dns_conformity")
 
+def check_bucket_name_dns_support(bucket_host, bucket_name):
+    """
+    Check whether either the host_bucket support buckets and
+    either bucket name is dns compatible
+    """
+    if "%(bucket)s" not in bucket_host:
+        return False
+
+    try:
+        return check_bucket_name(bucket_name, dns_strict = True)
+    except Exceptions.ParameterError:
+        return False
+__all__.append("check_bucket_name_dns_support")
+
 def getBucketFromHostname(hostname):
     """
     bucket, success = getBucketFromHostname(hostname)
@@ -477,4 +461,31 @@ def calculateChecksum(buffer, mfile, offset, chunk_size, send_chunk):
 
 __all__.append("calculateChecksum")
 
+
+# Deal with the fact that pwd and grp modules don't exist for Windows
+try:
+    import pwd
+    def getpwuid_username(uid):
+        """returns a username from the password databse for the given uid"""
+        return pwd.getpwuid(uid).pw_name
+except ImportError:
+    import getpass
+    def getpwuid_username(uid):
+        return getpass.getuser()
+__all__.append("getpwuid_username")
+
+try:
+    import grp
+    def getgrgid_grpname(gid):
+        """returns a groupname from the group databse for the given gid"""
+        return  grp.getgrgid(gid).gr_name
+except ImportError:
+    def getgrgid_grpname(gid):
+        return "nobody"
+
+__all__.append("getgrgid_grpname")
+
+
+
 # vim:et:ts=4:sts=4:ai
+

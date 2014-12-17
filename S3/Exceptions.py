@@ -2,9 +2,11 @@
 ## Author: Michal Ludvig <michal@logix.cz>
 ##         http://www.logix.cz/michal
 ## License: GPL Version 2
+## Copyright: TGRMN Software and contributors
 
 from Utils import getTreeFromXml, unicodise, deunicodise
 from logging import debug, info, warning, error
+import ExitCodes
 
 try:
     import xml.etree.ElementTree as ET
@@ -45,14 +47,13 @@ class S3Error (S3Exception):
             for header in response["headers"]:
                 debug("HttpHeader: %s: %s" % (header, response["headers"][header]))
         if response.has_key("data") and response["data"]:
-            tree = getTreeFromXml(response["data"])
-            error_node = tree
-            if not error_node.tag == "Error":
-                error_node = tree.find(".//Error")
-            for child in error_node.getchildren():
-                if child.text != "":
-                    debug("ErrorXML: " + child.tag + ": " + repr(child.text))
-                    self.info[child.tag] = child.text
+            try:
+                tree = getTreeFromXml(response["data"])
+            except ET.ParseError:
+                debug("Not an XML response")
+            else:
+                self.info.update(self.parse_error_xml(tree))
+
         self.code = self.info["Code"]
         self.message = self.info["Message"]
         self.resource = self.info["Resource"]
@@ -63,6 +64,40 @@ class S3Error (S3Exception):
         if self.info.has_key("Message"):
             retval += (u": %s" % self.info["Message"])
         return retval
+
+    def get_error_code(self):
+        if self.status in [301, 307]:
+            return ExitCodes.EX_SERVERMOVED
+        elif self.status in [400, 405, 411, 416, 501]:
+            return ExitCodes.EX_SERVERERROR
+        elif self.status == 403:
+            return ExitCodes.EX_ACCESSDENIED
+        elif self.status == 404:
+            return ExitCodes.EX_NOTFOUND
+        elif self.status == 409:
+            return ExitCodes.EX_CONFLICT
+        elif self.status == 412:
+            return ExitCodes.EX_PRECONDITION
+        elif self.status == 500:
+            return ExitCodes.EX_SOFTWARE
+        elif self.status == 503:
+            return ExitCodes.EX_SERVICE
+        else:
+            return ExitCodes.EX_SOFTWARE
+
+    @staticmethod
+    def parse_error_xml(tree):
+        info = {}
+        error_node = tree
+        if not error_node.tag == "Error":
+            error_node = tree.find(".//Error")
+        for child in error_node.getchildren():
+            if child.text != "":
+                debug("ErrorXML: " + child.tag + ": " + repr(child.text))
+                info[child.tag] = child.text
+
+        return info
+
 
 class CloudFrontError(S3Error):
     pass

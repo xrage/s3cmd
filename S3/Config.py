@@ -2,9 +2,10 @@
 ## Author: Michal Ludvig <michal@logix.cz>
 ##         http://www.logix.cz/michal
 ## License: GPL Version 2
+## Copyright: TGRMN Software and contributors
 
 import logging
-from logging import debug, info, error
+from logging import debug, info, warning, error
 import re
 import os
 import sys
@@ -14,9 +15,6 @@ import httplib
 try:
     import json
 except ImportError, e:
-    pass
-
-def warning(msg, *args, **kwargs):
     pass
 
 class Config(object):
@@ -46,6 +44,7 @@ class Config(object):
     upload_id = None
     skip_existing = False
     recursive = False
+    restore_days = 1
     acl_public = None
     acl_grants = []
     acl_revokes = []
@@ -78,6 +77,8 @@ class Config(object):
     gpg_encrypt = "%(gpg_command)s -c --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
     gpg_decrypt = "%(gpg_command)s -d --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
     use_https = False
+    ca_certs_file = ""
+    check_ssl_certificate = True
     bucket_location = "US"
     default_mime_type = "binary/octet-stream"
     guess_mime_type = True
@@ -94,7 +95,6 @@ class Config(object):
     debug_exclude = {}
     debug_include = {}
     encoding = "utf-8"
-    add_content_encoding = True
     urlencoding_mode = "normal"
     log_target_prefix = ""
     reduced_redundancy = False
@@ -111,7 +111,12 @@ class Config(object):
     files_from = []
     cache_file = ""
     add_headers = ""
+    remove_headers = []
     ignore_failed_copy = False
+    expiry_days = ""
+    expiry_date = ""
+    expiry_prefix = ""
+    signature_v2 = False
 
     ## Creating a singleton
     def __new__(self, configfile = None, access_key=None, secret_key=None):
@@ -133,7 +138,13 @@ class Config(object):
                 self.secret_key = secret_key
 
             if len(self.access_key)==0:
-                self.role_config()
+                env_access_key = os.environ.get("AWS_ACCESS_KEY", None) or os.environ.get("AWS_ACCESS_KEY_ID", None)
+                env_secret_key = os.environ.get("AWS_SECRET_KEY", None) or os.environ.get("AWS_SECRET_ACCESS_KEY", None)
+                if env_access_key:
+                    self.access_key = env_access_key
+                    self.secret_key = env_secret_key
+                else:
+                    self.role_config()
 
     def role_config(self):
         if sys.version_info[0] * 10 + sys.version_info[1] < 26:
@@ -216,7 +227,10 @@ class Config(object):
     def read_config_file(self, configfile):
         cp = ConfigParser(configfile)
         for option in self.option_list():
-            self.update_option(option, cp.get(option))
+            _option = cp.get(option)
+            if _option is not None:
+                _option = _option.strip()
+            self.update_option(option, _option)
 
         if cp.get('add_headers'):
             for option in cp.get('add_headers').split(","):
@@ -231,31 +245,43 @@ class Config(object):
     def update_option(self, option, value):
         if value is None:
             return
+
         #### Handle environment reference
         if str(value).startswith("$"):
             return self.update_option(option, os.getenv(str(value)[1:]))
+
         #### Special treatment of some options
         ## verbosity must be known to "logging" module
         if option == "verbosity":
+            # support integer verboisities
             try:
-                setattr(Config, "verbosity", logging._levelNames[value])
-            except KeyError:
-                error("Config: verbosity level '%s' is not valid" % value)
+                value = int(value)
+            except ValueError, e:
+                try:
+                    # otherwise it must be a key known to the logging module
+                    value = logging._levelNames[value]
+                except KeyError:
+                    error("Config: verbosity level '%s' is not valid" % value)
+                    return
+
         ## allow yes/no, true/false, on/off and 1/0 for boolean options
         elif type(getattr(Config, option)) is type(True):   # bool
             if str(value).lower() in ("true", "yes", "on", "1"):
-                setattr(Config, option, True)
+                value = True
             elif str(value).lower() in ("false", "no", "off", "0"):
-                setattr(Config, option, False)
+                value = False
             else:
                 error("Config: value of option '%s' must be Yes or No, not '%s'" % (option, value))
+                return
+
         elif type(getattr(Config, option)) is type(42):     # int
             try:
-                setattr(Config, option, int(value))
+                value = int(value)
             except ValueError, e:
                 error("Config: value of option '%s' must be an integer, not '%s'" % (option, value))
-        else:                           # string
-            setattr(Config, option, value)
+                return
+
+        setattr(Config, option, value)
 
 class ConfigParser(object):
     def __init__(self, file, sections = []):
@@ -313,6 +339,12 @@ class ConfigDumper(object):
     def dump(self, section, config):
         self.stream.write("[%s]\n" % section)
         for option in config.option_list():
-            self.stream.write("%s = %s\n" % (option, getattr(config, option)))
+            value = getattr(config, option)
+            if option == "verbosity":
+                # we turn level numbers back into strings if possible
+                if isinstance(value,int) and value in logging._levelNames:
+                    value = logging._levelNames[value]
+
+            self.stream.write("%s = %s\n" % (option, value))
 
 # vim:et:ts=4:sts=4:ai

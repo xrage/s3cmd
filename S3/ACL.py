@@ -2,6 +2,7 @@
 ## Author: Michal Ludvig <michal@logix.cz>
 ##         http://www.logix.cz/michal
 ## License: GPL Version 2
+## Copyright: TGRMN Software and contributors
 
 from Utils import getTreeFromXml
 
@@ -158,15 +159,15 @@ class ACL(object):
         grantee.name = name
         grantee.permission = permission
 
-        if  name.find('@') > -1:
-            grantee.name = grantee.name.lower
+        if  '@' in name:
+            grantee.name = grantee.name.lower()
             grantee.xsi_type = "AmazonCustomerByEmail"
             grantee.tag = "EmailAddress"
-        elif name.find('http://acs.amazonaws.com/groups/') > -1:
+        elif 'http://acs.amazonaws.com/groups/' in name:
             grantee.xsi_type = "Group"
             grantee.tag = "URI"
         else:
-            grantee.name = grantee.name.lower
+            grantee.name = grantee.name.lower()
             grantee.xsi_type = "CanonicalUser"
             grantee.tag = "ID"
 
