@@ -1527,16 +1527,19 @@ def cmd_sync_local2remote(args):
 
 
 def cmd_sync(args):
-    if (len(args) < 2):
-        raise ParameterError("Too few parameters! Expected: %s" % commands['sync']['param'])
+    try:
+        if (len(args) < 2):
+            raise ParameterError("Too few parameters! Expected: %s" % commands['sync']['param'])
 
-    if S3Uri(args[0]).type == "file" and S3Uri(args[-1]).type == "s3":
-        return cmd_sync_local2remote(args)
-    if S3Uri(args[0]).type == "s3" and S3Uri(args[-1]).type == "file":
-        return cmd_sync_remote2local(args)
-    if S3Uri(args[0]).type == "s3" and S3Uri(args[-1]).type == "s3":
-        return cmd_sync_remote2remote(args)
-    raise ParameterError("Invalid source/destination: '%s'" % "' '".join(args))
+        if S3Uri(args[0]).type == "file" and S3Uri(args[-1]).type == "s3":
+            return cmd_sync_local2remote(args)
+        if S3Uri(args[0]).type == "s3" and S3Uri(args[-1]).type == "file":
+            return cmd_sync_remote2local(args)
+        if S3Uri(args[0]).type == "s3" and S3Uri(args[-1]).type == "s3":
+            return cmd_sync_remote2remote(args)
+        raise ParameterError("Invalid source/destination: '%s'" % "' '".join(args))
+    except socket.gaierror:
+        info("Internet connectivity problem. Please try after sometime")
 
 
 def cmd_setacl(args):
